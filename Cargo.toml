@@ -1,0 +1,17 @@
+[package]
+
+name = "etcd_rs"
+version = "0.0.1"
+authors = ["Benjamin Fry <benjaminfry@mac.com>"]
+
+[lib]
+
+name = "etcd_rs"
+
+[dependencies]
+#chrono = "0.2"
+hyper = "0.3"
+log = "0.3"
+rustc-serialize = "0.3.12"
+time = "0.1"
+url = "0.2"
