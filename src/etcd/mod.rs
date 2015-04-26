@@ -67,6 +67,7 @@ impl<'a> AtomicOp<'a> {
 enum Param<'a> {
    Dir(bool),
    Recursive(bool),
+   Sorted(bool),
    Value(&'a str),
 }
 
@@ -75,6 +76,7 @@ impl<'a> Param<'a> {
 		match self {
 				Param::Dir(b) => ("dir".into(), b.to_string()),
 				Param::Recursive(b) => ("recursive".into(), b.to_string()),
+                Param::Sorted(b) => ("sorted".into(), b.to_string()),
 			    Param::Value(s) => ("value".into(), s.into()),
 			}
 	}
@@ -94,8 +96,7 @@ pub struct EtcdClient {
 // }
 
 impl EtcdClient {
-    fn build_url<I>(&self, object: EtcdObject, path: &str, params: I) -> hyper::Url
-       where I: Iterator<Item=(String, String)> {
+    fn build_url<'a>(&self, object: EtcdObject, path: &str, params: &'a Vec<(String,String)>) -> hyper::Url {
 		// todo this should be https
 		let mut url = hyper::Url::parse(&format!("http://{h}:{p}/{v}/{o}/{pt}",
                                                 h = self.etcd_host, p = self.etcd_port,
@@ -105,40 +106,24 @@ impl EtcdClient {
         }
 
         let mut url = url.unwrap();
+        for i in params.iter().map(|&(ref k,ref v)| -> (&'a str, &'a str) { (k,v) }) {
+            println!("query: {:?}", i);
+        }
+        url.set_query_from_pairs(params.iter().map(|&(ref k,ref v)| -> (&'a str, &'a str) { (k,v) }));
+        println!("url: {:?}", url);
 
-        // fn set_query_from_pairs<'a, I>(&mut self, pairs: I)
-		//  where I: Iterator<Item=(&'a str, &'a str)>
-
-        //let mut peekable = params.by_ref().peekable();
-        //let mut query_pairs: Vec<(&str, &str)> = Vec::new();
-
-        // loop {
-        //     //let ref mut mut_peekable = peekable;
-        //     let peek = peekable.by_ref().peek();
-        //     match peek {
-        //         Some(s) => { let (ref k, ref v) = *s; query_pairs.push((&k,&v)); },
-        //         None => break,
-        //     }
-        // }
-
-        //url.set_query_from_pairs(query_pairs.into_iter());
-
-
-		//url.set_query_from_pairs(params.map(|x: (String, String)| -> (&str, &str) { let (ref k, ref v) = x; (k, v) } ));
-
-        let params: Vec<(String,String)> = params.collect();
-        //url.set_query_from_pairs(params.iter().map(|&(ref k: String, ref v: String)| (&k, &v)));
-        url.set_query_from_pairs(params.iter().map(|&p: &(String, String)| -> (&str, &str) {let &(ref k, ref v) = p; return (k,v); }));
-
-
-
-		return url;
+        return url;
     }
 
 	#[inline(always)]
 	fn accept_json_header() -> hyper::header::Accept {
 		return hyper::header::Accept(vec![header::qitem(Mime(TopLevel::Application, SubLevel::Json, vec![]))]);
 	}
+
+    #[inline(always)]
+	fn content_type_form_header() -> hyper::header::ContentType {
+	    return hyper::header::ContentType(Mime(TopLevel::Application, SubLevel::WwwFormUrlEncoded, vec![]))
+    }
 
 	fn to_etcd_result(mut response: hyper::client::response::Response) -> Result<EtcdResult, etcd_error::EtcdError> {
 		if !response.status.is_success() {
@@ -157,13 +142,27 @@ impl EtcdClient {
 	// backup		backup an etcd directory
     // cluster-health	check the health of the etcd cluster
 
-    /// make an index value from the specified key (directory) with and ever increasing ordered index.
-    fn make_index(&self, key: &str, value: &str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
-		let url = self.build_url(EtcdObject::Keys, key, vec![].into_iter());
-		let body = url::form_urlencoded::serialize_owned(&vec![Param::Value(value).into()]/*.map(|x| map_str_string(x))*/);
+    /// make an index value from the specified key (directory) with an ever increasing ordered index.
+    fn index_append(&self, key: &str, value: &str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
+        // TODO this seems like a queue, should we offer queue style operations?
+		let url = self.build_url(EtcdObject::Keys, key, &vec![]);
+		let body = url::form_urlencoded::serialize_owned(&vec![Param::Value(value).into()]);
 		let response: hyper::client::response::Response = try!(Client::new()
 															   .post(url)
 															   .body(&body as &str)
+															   .header(Self::accept_json_header())
+                                                               .header(Self::content_type_form_header())
+                                                               .send());
+		let result = try!(EtcdClient::to_etcd_result(response));
+
+		return Ok(result.node);
+	}
+
+    /// this will return the ordered set of indexes on the specified keys
+    fn index_list(&self, key: &str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
+        let url = self.build_url(EtcdObject::Keys, key, &vec![Param::Recursive(true).into(), Param::Sorted(true).into()]);
+		let response: hyper::client::response::Response = try!(Client::new()
+															   .get(url)
 															   .header(EtcdClient::accept_json_header())
 															   .send());
 		let result = try!(EtcdClient::to_etcd_result(response));
@@ -171,14 +170,16 @@ impl EtcdClient {
 		return Ok(result.node);
 	}
 
+
     /// make a new directory
 	fn make_dir(&self, name: &str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
-		let url = self.build_url(EtcdObject::Keys, name, vec![].into_iter());
-		let body = url::form_urlencoded::serialize_owned(&vec![Param::Dir(true).into()]/*.map(|x| map_str_string(x))*/);
-		let response: hyper::client::response::Response = try!(Client::new()
+		let url = self.build_url(EtcdObject::Keys, name, &vec![]);
+		let body = url::form_urlencoded::serialize_owned(&vec![Param::Dir(true).into()]);
+        let response: hyper::client::response::Response = try!(Client::new()
 															   .put(url)
 															   .body(&body as &str)
-															   .header(EtcdClient::accept_json_header())
+                                                               .header(Self::accept_json_header())
+															   .header(Self::content_type_form_header())
 															   .send());
 
 		let result = try!(EtcdClient::to_etcd_result(response));
@@ -188,7 +189,7 @@ impl EtcdClient {
     /// remove a key
 	///  returns the node if it existsed.
 	fn remove(&self, key: &str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
-		let url = self.build_url(EtcdObject::Keys, key, vec![].into_iter());
+		let url = self.build_url(EtcdObject::Keys, key, &vec![]);
 		let response: hyper::client::response::Response = try!(Client::new()
 															   .delete(url)
 															   .header(EtcdClient::accept_json_header())
@@ -198,8 +199,8 @@ impl EtcdClient {
 	}
 
     //// removes the key if it is an empty directory or a key-value pair
-	fn remove_dir(&self, dir: &str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
-		let url = self.build_url(EtcdObject::Keys, dir, vec![Param::Dir(true).into()].into_iter()/*.map(|x| map_str_string(x))*/);
+	fn remove_dir(&self, dir: &str, recursive: bool) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
+		let url = self.build_url(EtcdObject::Keys, dir, &vec![Param::Dir(true).into(), Param::Recursive(recursive).into()]);
 		let response: hyper::client::response::Response = try!(Client::new()
 															   .delete(url)
 															   .header(EtcdClient::accept_json_header())
@@ -211,7 +212,7 @@ impl EtcdClient {
     /// retrieve the value of a key
 	fn get(&self, key: &str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
 		println!("getting {}", key);
-		let url = self.build_url(EtcdObject::Keys, key, vec![].into_iter());
+		let url = self.build_url(EtcdObject::Keys, key, &vec![]);
 
 		let response: hyper::client::response::Response = try!(Client::new()
 															   .get(url)
@@ -224,8 +225,10 @@ impl EtcdClient {
 		return Ok(result.node);
 	}
 
-    //// retrieve a directory
-	fn list(dir: String) {}
+    //// retrieve a directory, this is just a wrapper for get...
+	fn list<'a>(&self, dir: &'a str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
+        return self.get(dir);
+    }
 
     /// set the value of a key
 	///  returns the previous node if there was one.
@@ -234,7 +237,7 @@ impl EtcdClient {
 
 		println!("setting {}:{}", key, value);
 
-		let url = self.build_url(EtcdObject::Keys, key, vec![].into_iter());
+		let url = self.build_url(EtcdObject::Keys, key, &vec![Param::Dir(false).into()]);
 
 		let body = url::form_urlencoded::serialize_owned(&vec![Param::Value(value).into()]/*.map(|x| map_str_string(x))*/);
 		let response: hyper::client::response::Response = try!(Client::new()
