@@ -5,7 +5,9 @@
 use etcd::EtcdClient;
 use etcd::etcd_node::EtcdNode;
 use etcd::etcd_error::EtcdError;
+use etcd::etcd_result::EtcdResult;
 
+use std::thread;
 
 static TEST_HOST: &'static str = "localhost";
 static TEST_PORT: u16 = 4001;
@@ -34,8 +36,9 @@ fn ordered_tests() {
     run!(test_remove_dir(false));
     run!(test_make_dir());
 	run!(test_set());
-	run!(test_get());
+    run!(test_get());
     run!(test_list());
+    run!(test_watch());
 	run!(test_remove());
     run!(test_index_append());
 
@@ -126,6 +129,35 @@ fn test_list() {
 
     assert!(zero.is_some());
     assert_eq!(zero, &Some("testvalue".to_string()));
+}
+
+fn test_watch() {
+    let test_thread = thread::current();
+
+    let watch_join: thread::JoinHandle<Result<EtcdResult, EtcdError>> = thread::spawn(move || {
+        let client = client();
+        test_thread.unpark();
+
+        // there is a potential race here... i.e. we unparked the test thread before we watched...
+        //  this blocks, so we had to do it above, TODO non-blocking future should be returned.
+        client.watch(TEST_KEY) // this should block until we change the value...
+    });
+
+    // make sure this primary thread pauses for the child to complete the watch...
+    thread::park();
+
+    // now change the value...
+    let client = client();
+    assert!(client.set(TEST_KEY, "testwatch").is_ok());
+
+    let etcd_result = watch_join.join().unwrap().unwrap();
+    assert_eq!(etcd_result.action, "set");
+    assert_eq!(etcd_result.node.unwrap().value.unwrap(), "testwatch");
+    assert_eq!(etcd_result.previous_node.unwrap().value.unwrap(), "testvalue");
+
+    // reset the value
+    assert!(client.set(TEST_KEY, "testvalue").is_ok()); // now set it
+
 }
 
 fn test_remove() {

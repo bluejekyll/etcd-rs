@@ -5,7 +5,7 @@ mod etcd_result;
 #[cfg(test)]
 mod tests;
 
-use hyper::client::{IntoBody,Client};
+use hyper::client::{Body,Client};
 use hyper::mime::{Mime, TopLevel, SubLevel};
 use hyper::header;
 use hyper;
@@ -48,18 +48,18 @@ enum AtomicOp<'a> {
    /// The PrevValue must match the specified value.
    PrevValue(&'a str),
    /// The PrevIndex must match the specified index.
-   PrevIndex(&'a str/*u64*/),
+   PrevIndex(u64),
    /// True the operation will only succeed if the key already existed, i.e. it's an update, it will fail if it does not
    ///  exist. False if it should not exist, i.e. it's a create, the operation will fail if it already exists.
-   PrevExist(&'a str/*bool*/),
+   PrevExist(bool),
 }
 
 impl<'a> AtomicOp<'a> {
-   fn into(self) -> (&'static str, &'a str) {
+   fn into(self) -> (String, String) {
 	   match self {
-		      AtomicOp::PrevValue(s) => ("prevValue", s/*.to_string()*/),
-		      AtomicOp::PrevIndex(i) => ("prevIndex", i/*.to_string()*/),
-		      AtomicOp::PrevExist(b) => ("prevExists", b/*.to_string()*/),
+		      AtomicOp::PrevValue(s) => ("prevValue".into(), s.into()),
+		      AtomicOp::PrevIndex(i) => ("prevIndex".into(), i.to_string()),
+		      AtomicOp::PrevExist(b) => ("prevExists".into(), b.to_string()),
 		   }
    }
 }
@@ -69,6 +69,8 @@ enum Param<'a> {
    Recursive(bool),
    Sorted(bool),
    Value(&'a str),
+   Wait(bool),
+   WaitIndex(u64),
 }
 
 impl<'a> Param<'a> {
@@ -78,7 +80,9 @@ impl<'a> Param<'a> {
 				Param::Recursive(b) => ("recursive".into(), b.to_string()),
                 Param::Sorted(b) => ("sorted".into(), b.to_string()),
 			    Param::Value(s) => ("value".into(), s.into()),
-			}
+                Param::Wait(b) => ("wait".into(), b.to_string()),
+			    Param::WaitIndex(i) => ("waitIndex".into(), i.to_string()),
+            }
 	}
 }
 
@@ -89,11 +93,6 @@ pub struct EtcdClient {
     etcd_host: String,
     etcd_port: u16,
 }
-
-// fn map_str_string<'a>(value: (&'static str, String)) -> (&'static str, &'a str) {
-//     let (k,v) = value;
-//     return (k,&v);
-// }
 
 impl EtcdClient {
     fn build_url<'a>(&self, object: EtcdObject, path: &str, params: &'a Vec<(String,String)>) -> hyper::Url {
@@ -233,10 +232,6 @@ impl EtcdClient {
     /// set the value of a key
 	///  returns the previous node if there was one.
 	fn set<'a>(&self, key: &'a str, value: &'a str) -> Result<Option<EtcdNode>, etcd_error::EtcdError> {
-		// PUT
-
-		println!("setting {}:{}", key, value);
-
 		let url = self.build_url(EtcdObject::Keys, key, &vec![Param::Dir(false).into()]);
 
 		let body = url::form_urlencoded::serialize_owned(&vec![Param::Value(value).into()]/*.map(|x| map_str_string(x))*/);
@@ -259,8 +254,21 @@ impl EtcdClient {
     //// update an existing directory
 	//fn update_dir(key: &str, value: &Vec<String>) {}
 
-    //// watch a key for changes
-	//fn watch(key: String) {}
+    /// watch a key for changes
+    ///  blocks until the key changes
+    /// TODO need to accept the wait index option to guarantee no races.
+	fn watch<'a>(&self, key: &'a str) -> Result<EtcdResult, etcd_error::EtcdError> {
+        let url = self.build_url(EtcdObject::Keys, key, &vec![Param::Wait(true).into()]);
+
+        let response: hyper::client::response::Response = try!(Client::new()
+                                                                .get(url)
+                                                                .header(EtcdClient::accept_json_header())
+                                                                .send());
+
+        // this will block until the server returns, TODO we should really return a future
+        return EtcdClient::to_etcd_result(response);
+    }
+
 
     //// watch a key for changes and exec an executable
 	//fn exec_watch(key: String) {}
